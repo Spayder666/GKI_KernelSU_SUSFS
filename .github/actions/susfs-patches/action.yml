@@ -96,10 +96,30 @@ runs:
           echo "Applying base.c Android 14 6.1 Fake Patch"
           sed -i '/^#include <linux\/cpufreq_times.h>$/a #include <linux/dma-buf.h>' fs/proc/base.c
         fi
-        if [ "${{ inputs.sublevel }}" -le "156" ]; then
-          echo "Applying namespace.c Android 14 6.1 Fake Patch (sublevel<=156: sources lack the blk.h include the susfs base patch expects)"
-          sed -i 's|^#include "internal.h"$|#include "internal.h"\n#include <trace/hooks/blk.h>|' fs/namespace.c
-        fi
+        echo "Adjusting susfs base patch namespace.c hunk (drop blk.h context line absent from older sublevel sources)"
+        python3 - <<'PYEOF'
+        import re
+        path = '50_add_susfs_in_gki-android14-6.1.patch'
+        lines = open(path, encoding='utf-8').read().splitlines(keepends=True)
+        out = []
+        in_ns = False
+        fixed = False
+        for ln in lines:
+            if ln.startswith('+++ b/fs/namespace.c'):
+                in_ns = True
+            elif ln.startswith('--- a/') or ln.startswith('+++ b/'):
+                in_ns = False
+            if in_ns and not fixed and ln.startswith('@@ -'):
+                m = re.match(r'@@ -(\d+),(\d+) \+(\d+),(\d+) @@', ln)
+                if m:
+                    ln = '@@ -%s,%d +%s,%d @@\n' % (m.group(1), int(m.group(2)) - 1, m.group(3), int(m.group(4)) - 1)
+                    fixed = True
+            if in_ns and ln == ' #include <trace/hooks/blk.h>\n':
+                continue
+            out.append(ln)
+        open(path, 'w', encoding='utf-8').write(''.join(out))
+        print('susfs base patch: namespace.c blk.h context dropped, hunk header adjusted' if fixed else 'susfs base patch: namespace.c hunk header not found')
+        PYEOF
         if [ "${{ inputs.sublevel }}" -ge "157" ]; then
           echo "Applying namespace.c Android 14 6.1 Fake Patch"
           sed -i '/^#include <trace\/hooks\/blk.h>$/d' fs/namespace.c
