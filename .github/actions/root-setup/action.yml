@@ -136,6 +136,35 @@ runs:
           fi
         done
 
+    - name: Disable KernelSU-Next packages.list observer (throne hunt off)
+      if: inputs.flavor == 'next'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/KernelSU-Next
+      run: |
+        # The packages.list fsnotify observer rescans /data/app on every
+        # rewrite; that kernel-side directory walk is an inotify-detectable
+        # root fingerprint (throne-hunt class detectors). The boot-time
+        # crown (track_throne in core/init.c) stays, so the manager keeps
+        # its root across reboots; only the runtime rescan is disabled.
+        python3 - <<'PY'
+        import io
+        p = "kernel/manager/pkg_observer.c"
+        s = io.open(p, encoding="utf-8").read()
+        sig = ("static int ksu_handle_inode_event(struct fsnotify_mark *mark, u32 mask,\n"
+               "                                  struct inode *inode, struct inode *dir,\n"
+               "                                  const struct qstr *file_name, u32 cookie)\n{")
+        assert sig in s, "pkg_observer: inode_event signature not found"
+        s = s.replace(sig, sig + "\n\t/* dc: throne hunt disabled */\n\treturn 0;", 1)
+        decl = "int ksu_observer_init(void)\n{\n\tint ret = 0;\n"
+        assert decl in s, "pkg_observer: observer_init ret decl not found"
+        s = s.replace(decl, "int ksu_observer_init(void)\n{\n", 1)
+        call = "\tret = watch_one_dir(&g_watch);"
+        assert call in s, "pkg_observer: watch_one_dir call not found"
+        s = s.replace(call, "\t/* dc: no fsnotify mark on /data/system (throne hunt off) */\n\t(void)watch_one_dir;", 1)
+        io.open(p, "w", encoding="utf-8", newline="\n").write(s)
+        print("pkg_observer: throne hunt disabled")
+        PY
+
     - name: Disable multi-manager for BakaSU
       if: inputs.flavor == 'bakasu'
       uses: ./.github/actions/set-kernel-config
