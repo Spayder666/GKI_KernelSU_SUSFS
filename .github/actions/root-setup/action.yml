@@ -176,6 +176,69 @@ runs:
         print("pkg_observer: crown-gated (throne hunt off after crown)")
         PY
 
+    - name: Time-cohere selinux_hide context rejects (next)
+      if: inputs.flavor == 'next'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/KernelSU-Next
+      run: |
+        # my_write_context() answers /proc/self/attr/current writes against
+        # the backup policy (that is what keeps the KSU-specific context
+        # oracle rejected for apps). A structurally valid but unknown-type
+        # context pays the full backup parse, while a leading-newline
+        # context fails before any policy work - so the invalid-type vs
+        # newline-prefix pair turns the oracle into a timing side channel
+        # (Duck 2026.10.25 "App Zygote attr/current timing": paired median
+        # positive at ~90% A-slower pairs). Give the definitely-invalid
+        # class the same full-cost backup parse through a canonical probe
+        # context (type that does not exist in the backup policy), then
+        # return EINVAL exactly like stock does. The probe is declared
+        # longer than typical probe contexts so the residual direction
+        # drifts negative, which the detector treats as baseline.
+        python3 - <<'PY'
+        import io
+        p = "kernel/feature/selinux_hide.c"
+        s = io.open(p, encoding="utf-8").read()
+        marker = "dc: timing-coherent"
+        assert marker not in s, "selinux_hide: timing-coherent gate already applied"
+        anchor = (
+            "    length =\n"
+            "        ksu_avc_has_perm_compat(current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__CHECK_CONTEXT, NULL);\n"
+            "    if (length)\n"
+            "        goto out;\n"
+            "    length = __security_context_to_sid_with_policy(backup_sepolicy, buf, size, &sid, SECSID_NULL, GFP_KERNEL, NULL, NULL);\n"
+        )
+        assert anchor in s, "selinux_hide: my_write_context anchor not found"
+        gate = (
+            "    length =\n"
+            "        ksu_avc_has_perm_compat(current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__CHECK_CONTEXT, NULL);\n"
+            "    if (length)\n"
+            "        goto out;\n"
+            "    /* dc: timing-coherent reject (Duck 2026.10.25 \"App Zygote\n"
+            "     * attr/current timing\"). Stock fails a leading-garbage context\n"
+            "     * before any policy work, so the invalid-type vs newline-prefix\n"
+            "     * pair turns the backup-policy parse into a timing side channel.\n"
+            "     * Give the definitely-invalid class the same full-cost backup\n"
+            "     * parse through a canonical probe context, then return EINVAL\n"
+            "     * exactly like stock does. The probe type does not exist in the\n"
+            "     * backup policy, so the oracle verdict is unchanged. */\n"
+            "    if (size && (buf[0] == '\\n' || buf[0] == '\\r' || buf[0] == ' ' ||\n"
+            "                 buf[0] == '\\t' || buf[0] == ':' || buf[0] == ';')) {\n"
+            "        static const char dc_probe_ctx[] =\n"
+            "            \"u:r:dc_probe_sentinel_long_oracle_context_t:s0\";\n"
+            "        u32 dc_sid;\n"
+            "\n"
+            "        __security_context_to_sid_with_policy(backup_sepolicy, dc_probe_ctx,\n"
+            "            (u32)(sizeof(dc_probe_ctx) - 1), &dc_sid, SECSID_NULL,\n"
+            "            GFP_KERNEL, NULL, NULL);\n"
+            "        return -EINVAL;\n"
+            "    }\n"
+            "    length = __security_context_to_sid_with_policy(backup_sepolicy, buf, size, &sid, SECSID_NULL, GFP_KERNEL, NULL, NULL);\n"
+        )
+        s = s.replace(anchor, gate, 1)
+        io.open(p, "w", encoding="utf-8", newline="\n").write(s)
+        print("selinux_hide: timing-coherent reject installed")
+        PY
+
     - name: Disable multi-manager for BakaSU
       if: inputs.flavor == 'bakasu'
       uses: ./.github/actions/set-kernel-config
