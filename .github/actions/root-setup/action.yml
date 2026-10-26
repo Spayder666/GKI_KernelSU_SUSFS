@@ -238,6 +238,56 @@ runs:
         io.open(p, "w", encoding="utf-8", newline="\n").write(s)
         print("selinux_hide: timing-coherent reject installed")
         PY
+    - name: Time-cohere my_setprocattr newline rejects (next)
+      if: inputs.flavor == 'next'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/KernelSU-Next
+      run: |
+        # The /proc/self/attr/current carrier is my_setprocattr(), not
+        # my_write_context(): the newline-prefix class skips the backup
+        # parse entirely (stock-shaped early reject), while the
+        # invalid-type class pays the full dual-policy parse - that pair
+        # is Duck 2026.10.25 "App Zygote attr/current timing". Burn the
+        # same full-cost backup parse for the newline class via a
+        # canonical probe context before the stock deny path, keeping
+        # the EINVAL verdict and the oracle semantics unchanged.
+        python3 - <<'PY'
+        import io
+        p = "kernel/feature/selinux_hide.c"
+        s = io.open(p, encoding="utf-8").read()
+        marker = "dc: timing-coherent newline"
+        assert marker not in s, "selinux_hide: newline gate already applied"
+        anchor = (
+            "    /* Obtain a SID for the context, if one was specified. */\n"
+            "    if (size && str[0] && str[0] != '\\n') {\n"
+        )
+        assert anchor in s, "selinux_hide: my_setprocattr anchor not found"
+        gate = (
+            "    /* dc: timing-coherent newline reject (Duck 2026.10.25 \"App\n"
+            "     * Zygote attr/current timing\"). Stock skips the context parse\n"
+            "     * for a leading-newline value, so the invalid-type vs\n"
+            "     * newline-prefix pair turns the backup-policy parse into a\n"
+            "     * timing side channel. Burn the same full-cost backup parse\n"
+            "     * through a canonical probe context (type that does not exist\n"
+            "     * in the backup policy), then keep the stock deny path with\n"
+            "     * sid == 0. The verdict is unchanged, only the cost matches. */\n"
+            "    if (size && str[0] == '\\n') {\n"
+            "        static const char dc_probe_ctx[] =\n"
+            "            \"u:r:dc_probe_sentinel_long_oracle_context_t:s0\";\n"
+            "        u32 dc_sid = 0, dc_orig_sid = 0;\n"
+            "        int dc_orig_err = 0;\n"
+            "\n"
+            "        __security_context_to_sid_with_policy(backup_sepolicy, dc_probe_ctx,\n"
+            "            (u32)(sizeof(dc_probe_ctx) - 1), &dc_sid, SECSID_NULL,\n"
+            "            GFP_KERNEL, &dc_orig_sid, &dc_orig_err);\n"
+            "    }\n"
+            "    /* Obtain a SID for the context, if one was specified. */\n"
+            "    if (size && str[0] && str[0] != '\\n') {\n"
+        )
+        s = s.replace(anchor, gate, 1)
+        io.open(p, "w", encoding="utf-8", newline="\n").write(s)
+        print("selinux_hide: timing-coherent newline reject installed")
+        PY
 
     - name: Disable multi-manager for BakaSU
       if: inputs.flavor == 'bakasu'
