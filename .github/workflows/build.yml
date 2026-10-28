@@ -462,6 +462,67 @@ jobs:
           brand_name: ${{ inputs.brand_name }}
           keep_kmi: ${{ inputs.keep_kmi }}
 
+      - name: Hide kernel identity symbol names
+        shell: bash
+        working-directory: ${{ github.workspace }}/kernel
+        run: |
+          # dc: the kallsyms NAME table is world-readable (addresses are zeroed
+          # by kptr_restrict, names are not). Chunqiu-class environment checkers
+          # scan it for identifiers that cannot exist on a stock GKI kernel.
+          # Three leaks ship with our feature set: the nomount initcall symbols
+          # (nomount_init / nomount_exit / __initcall__kmod_nomount*), the susfs
+          # uname flag and the susfs selinux-setup static key
+          # (is_susfs_uname_set, is_selinux_setup_susfs[.expected]). nomount is
+          # not integrated in this build (use_nomount=false); the two susfs
+          # identifiers are renamed tree-wide with word boundaries so both the
+          # susfs core (fs/susfs.c, include/linux/susfs.h) and every KSU hook
+          # that references them stay consistent. Nothing else about susfs is
+          # touched: include paths, CONFIG_ names and pr_* strings are left as
+          # is (apps cannot read dmesg). Asserts are atomic: if upstream
+          # renames these identifiers the CI must fail loudly, not silently
+          # build a detectable kernel.
+          python3 - <<'PY'
+          import io, os, re, sys
+
+          root = os.getcwd()
+          targets = {
+              "is_susfs_uname_set": "is_uname_override_active",
+              "is_selinux_setup_susfs": "is_selinux_setup_completed",
+          }
+          word = {k: re.compile(r"(?<![A-Za-z0-9_])" + re.escape(k) + r"(?![A-Za-z0-9_])") for k in targets}
+          hits = {k: 0 for k in targets}
+          files_changed = []
+          for dirpath, _dirs, names in os.walk(root):
+              if "/.git" in dirpath:
+                  continue
+              for n in names:
+                  if not (n.endswith(".c") or n.endswith(".h")):
+                      continue
+                  fp = os.path.join(dirpath, n)
+                  try:
+                      s = io.open(fp, encoding="utf-8", errors="surrogateescape").read()
+                  except OSError:
+                      continue
+                  ns = s
+                  for k, rx in word.items():
+                      ns2, cnt = rx.subn(targets[k], ns)
+                      if cnt:
+                          hits[k] += cnt
+                      ns = ns2
+                  if ns != s:
+                      io.open(fp, "w", encoding="utf-8", newline="").write(ns)
+                      files_changed.append(os.path.relpath(fp, root))
+          for k, c in sorted(hits.items()):
+              print("renamed %s x%d" % (k, c))
+          if hits["is_susfs_uname_set"] == 0:
+              sys.exit("FATAL: is_susfs_uname_set not found - upstream layout changed")
+          if hits["is_selinux_setup_susfs"] == 0:
+              sys.exit("FATAL: is_selinux_setup_susfs not found - upstream layout changed")
+          print("files changed: %d" % len(files_changed))
+          for f in sorted(files_changed)[:12]:
+              print("  " + f)
+          PY
+
       - name: Remove Protected Exports
         uses: ./.github/actions/remove-protected-exports
 
