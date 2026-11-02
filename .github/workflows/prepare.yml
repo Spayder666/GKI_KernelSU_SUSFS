@@ -3,6 +3,11 @@ name: Prepare and Build
 on:
   workflow_call:
     inputs:
+      runner:
+        description: 'Runner image label for the build jobs (ubuntu-24.04 or ubuntu-latest)'
+        required: false
+        type: string
+        default: 'ubuntu-24.04'
       config_file:
         description: "Path to the JSON config file"
         required: true
@@ -75,7 +80,7 @@ on:
         description: "Enable ccache/bazel cache"
         required: false
         type: boolean
-        default: true
+        default: false
       os_patch_level:
         description: "Optional filter: patch date (YYYY-MM), kernel sublevel, lts (LTS branch), or all"
         required: false
@@ -94,7 +99,7 @@ on:
 
 jobs:
   generate-matrix:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.final.outputs.matrix }}
       version_slug: ${{ steps.final.outputs.version_slug }}
@@ -183,7 +188,7 @@ jobs:
     # Branches that call prepare.yml directly keep the default (true).
     needs: generate-matrix
     if: inputs.produce_stock_configs != 'false'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version_slug: ${{ steps.prep.outputs.version_slug }}
     steps:
@@ -276,7 +281,8 @@ jobs:
                 mkdir -p "${STOCK_DIR}/heads"
                 printf '%s' "$CUR_HEAD" > "${STOCK_DIR}/heads/${KVER}.head"
               else
-                echo "::warning title=stock-configs::could not fetch stock config for ${KVER} — build legs will fall back to a live download"
+                echo "::error title=stock-configs::could not fetch stock config for ${KVER} — required, not optional" >&2
+                exit 1
               fi
             fi
             if [ "$PAGE_SIZE" = "16k" ]; then
@@ -290,7 +296,8 @@ jobs:
                   mkdir -p "${STOCK_DIR}/heads"
                   printf '%s' "$CUR_HEAD" > "${STOCK_DIR}/heads/${KVER}_16k.head"
                 else
-                  echo "::warning title=stock-configs::could not fetch 16k stock config for ${KVER} — build legs will fall back to a live download"
+                  echo "::error title=stock-configs::could not fetch 16k stock config for ${KVER} — required, not optional" >&2
+                  exit 1
                 fi
               fi
             fi
@@ -315,18 +322,12 @@ jobs:
     # stock-configs may be skipped on non-producer legs (produce_stock_configs=false)
     needs: [generate-matrix, stock-configs]
     if: ${{ !cancelled() && needs.generate-matrix.result == 'success' }}
-    concurrency:
-      # Must include every matrix field that varies. The old key was only
-      # root_flavor + version, so every patch level of a family shared one
-      # group: with cancel-in-progress: false they queued instead of running
-      # in parallel, and an "All" dispatch compiled one kernel at a time.
-      group: prepare-${{ inputs.root_flavor }}-${{ matrix.version }}-${{ matrix.sublevel }}-${{ matrix.os_patch_level }}-${{ matrix.variant }}
-      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
     uses: ./.github/workflows/build.yml
     with:
+      runner: ${{ inputs.runner }}
       version: ${{ matrix.version }}
       android_version: ${{ matrix.android_version }}
       kernel_version: ${{ matrix.kernel_version }}
