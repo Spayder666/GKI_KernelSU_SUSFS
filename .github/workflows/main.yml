@@ -65,6 +65,10 @@ on:
           - verified
           - update
         default: verified
+      next_root_commit:
+        description: "Pin KernelSU-Next kernel commit (empty = dev-susfs tip). d21e0a66 = r22-era kernel without the 11-02 Samsung-KDP/susfs-LKM commits."
+        type: string
+        default: ""
       root_flavor:
         description: "Root Flavor"
         type: choice
@@ -364,7 +368,13 @@ jobs:
           # (it can only ever run with SUSFS off — enforced below).
           KOWSU_COMMIT="$(resolve_sha https://github.com/KOWX712/KernelSU.git refs/heads/master)"
           emit kowsu_commit "$KOWSU_COMMIT"
-          if [ "$SCHED_SUSFS" = "true" ]; then
+          if [ -n "${{ inputs.next_root_commit }}" ]; then
+            # dc: explicit pin — 'next' has no audited pin in verified mode, so
+            # a release-era kernel (r22 = d21e0a66) needs this override; the tip
+            # dragged in Samsung-KDP/susfs-LKM commits whose kallsyms symbols
+            # (samsung_kdp_*) are a non-stock artifact on Pixels (2026-11-03).
+            NEXT_COMMIT="${{ inputs.next_root_commit }}"
+          elif [ "$SCHED_SUSFS" = "true" ]; then
             NEXT_COMMIT="$(resolve_sha https://github.com/pershoot/KernelSU-Next.git refs/heads/dev-susfs)"
           else
             NEXT_COMMIT="$(resolve_sha https://github.com/KernelSU-Next/KernelSU-Next.git refs/heads/dev)"
