@@ -401,6 +401,33 @@ jobs:
           brand_name: ${{ inputs.brand_name }}
           keep_kmi: ${{ inputs.keep_kmi }}
 
+      - name: Silence era-mismatched SUSFS glue (pinned KernelSU-Next)
+        # dc: a release-era KSU-Next pin (next_root_commit=d21e0a66) lacks the
+        # callers for susfs_switch_to_ksu_domain/susfs_restore_creds that the
+        # restructured tree has; the retired fake-patch flow used to provide
+        # them. __used suppresses -Wunused-function; no-op when the functions
+        # are absent or genuinely used (current tips).
+        shell: bash
+        working-directory: ${{ github.workspace }}/kernel
+        run: |
+          python3 - <<'PY'
+          import io
+          p = "common/fs/susfs.c"
+          try:
+              s = io.open(p, encoding="utf-8", errors="surrogateescape").read()
+          except OSError:
+              raise SystemExit("no fs/susfs.c")
+          n = 0
+          for fn in ("susfs_switch_to_ksu_domain", "susfs_restore_creds"):
+              old = "static void " + fn
+              new = "static __used void " + fn
+              if old in s and new not in s:
+                  s = s.replace(old, new)
+                  n += 1
+          io.open(p, "w", encoding="utf-8", errors="surrogateescape", newline="").write(s)
+          print("__used added:", n)
+          PY
+
       - name: Hide kernel identity symbol names
         shell: bash
         working-directory: ${{ github.workspace }}/kernel
