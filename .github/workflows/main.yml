@@ -65,6 +65,10 @@ on:
           - verified
           - update
         default: verified
+      susfs_pin_override:
+        description: "Override the verified SUSFS pin (all branches) when pinning a release-era KernelSU-Next; empty = audited pins"
+        type: string
+        default: ""
       next_root_commit:
         description: "Pin KernelSU-Next kernel commit (empty = dev-susfs tip). d21e0a66 = r22-era kernel without the 11-02 Samsung-KDP/susfs-LKM commits."
         type: string
@@ -288,6 +292,15 @@ jobs:
             [susfs_commit_android15_6_6]="0606e19afae93ffc88e53883dbf3cfced62a7b59"
             [susfs_commit_android16_6_12]="519c86c5d8ad3832ff4a2e1a81dc1b81076f1693"
           )
+          # dc: release-era KSU-Next (next_root_commit) pairs with the SUSFS
+          # tip of ITS day — the current audited pin expects the restructured
+          # pershoot tree and leaves glue functions unused (-Werror). b57ed199
+          # is the proven d21e0a6-era pair (run 39524014947).
+          if [ -n "${{ inputs.susfs_pin_override }}" ]; then
+            for k in "${!PIN_SUSFS[@]}"; do
+              PIN_SUSFS["$k"]="${{ inputs.susfs_pin_override }}"
+            done
+          fi
           # BakaSU keeps its own SUSFS pin set (kept separate so it can diverge
           # again). Values = the same verified branch tips as PIN_SUSFS.
           declare -A PIN_SUSFS_BAKASU=(
