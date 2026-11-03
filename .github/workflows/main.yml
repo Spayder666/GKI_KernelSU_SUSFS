@@ -791,6 +791,7 @@ jobs:
     with:
       runner: ${{ inputs.kernel_runner }}
       config_file: .github/config/android14-6.1.json
+      susfs_pin_override: ${{ inputs.susfs_pin_override }}
       feature_set: ${{ needs.resolve-sources.outputs.feature_set }}
       susfs_commit: ${{ matrix.root.root_flavor == 'bakasu' && needs.resolve-sources.outputs.susfs_commit_android14_6_1_bakasu || (matrix.root.root_flavor == 'sukisu-ultra' && needs.resolve-sources.outputs.susfs_commit_android14_6_1_sukisu_ultra || needs.resolve-sources.outputs.susfs_commit_android14_6_1) }}
       nomount_commit: ${{ needs.resolve-sources.outputs.nomount_commit }}
