@@ -9,6 +9,10 @@ inputs:
     description: 'SUSFS commit hash (empty = latest on auto-derived gki-{version} branch)'
     required: false
     default: ""
+  commit_override:
+    description: 'Explicit SUSFS pin that beats the next-flavor tip resolve (era pairing with next_root_commit)'
+    required: false
+    default: ""
   version:
     description: 'Kernel config version (e.g., android15-6.6)'
     required: true
@@ -46,7 +50,10 @@ runs:
         # SUSFS stays API-matched to the always-latest KernelSU-Next tree. All
         # other roots (kernelsu, bakasu, finasu, sukisu-ultra) use the pinned
         # verified SUSFS commit.
-        if [ "${{ inputs.root_flavor }}" = "next" ]; then
+        if [ -n "${{ inputs.commit_override }}" ]; then
+          SUSFS_COMMIT="${{ inputs.commit_override }}"
+          echo "Using explicit SUSFS commit override: ${SUSFS_COMMIT}"
+        elif [ "${{ inputs.root_flavor }}" = "next" ]; then
           BRANCH="gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}"
           SUSFS_COMMIT="$(git ls-remote https://gitlab.com/simonpunk/susfs4ksu.git "refs/heads/${BRANCH}" | cut -f1)"
           echo "KernelSU-Next: resolving SUSFS at latest on ${BRANCH} -> ${SUSFS_COMMIT}"

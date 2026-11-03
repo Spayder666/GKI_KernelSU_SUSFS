@@ -155,6 +155,7 @@ jobs:
       root_flavor: ${{ steps.resolve.outputs.root_flavor }}
       root_commit: ${{ steps.resolve.outputs.root_commit }}
       root_matrix: ${{ steps.resolve.outputs.root_matrix }}
+      susfs_pin_override: ${{ inputs.susfs_pin_override }}
       susfs_commit_android12_5_10: ${{ steps.resolve.outputs.susfs_commit_android12_5_10 }}
       susfs_commit_android13_5_10: ${{ steps.resolve.outputs.susfs_commit_android13_5_10 }}
       susfs_commit_android13_5_15: ${{ steps.resolve.outputs.susfs_commit_android13_5_15 }}

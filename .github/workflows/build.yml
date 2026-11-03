@@ -36,6 +36,10 @@ on:
         required: false
         type: string
         default: ""
+      susfs_pin_override:
+        description: 'Explicit SUSFS pin (era pairing with next_root_commit)'
+        type: string
+        default: ""
       susfs_commit:
         required: false
         type: string
@@ -302,6 +306,7 @@ jobs:
         with:
           enabled: ${{ contains(inputs.feature_set, 'SUSFS') || inputs.feature_set == 'All' }}
           susfs_commit: ${{ inputs.susfs_commit }}
+          commit_override: ${{ inputs.susfs_pin_override }}
           version: ${{ inputs.version }}
           android_version: ${{ inputs.android_version }}
           kernel_version: ${{ inputs.kernel_version }}
@@ -630,6 +635,7 @@ jobs:
           feature_set: ${{ inputs.feature_set }}
           nomount_commit: ${{ inputs.nomount_commit }}
           susfs_commit: ${{ inputs.susfs_commit }}
+          commit_override: ${{ inputs.susfs_pin_override }}
 
       - name: Upload Artifacts
         id: kernel-artifact
