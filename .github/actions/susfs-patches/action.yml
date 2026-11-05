@@ -114,6 +114,16 @@ runs:
           echo "Applying base.c Android 14 6.1 Fake Patch"
           sed -i '/^#include <linux\/cpufreq_times.h>$/a #include <linux/dma-buf.h>' fs/proc/base.c
         fi
+        # Sublevel < 157 sources do not contain trace/hooks/blk.h. The SUSFS
+        # patch still lists that include as namespace.c context, so the hunk
+        # rejects (6.1.145). Drop the context line from the patch. Inserting
+        # the include fails the build: the header is not in this tree.
+        # Sublevel >= 157 keeps the line. Deleting it from the sources (-ge)
+        # breaks the SUSFS patch context, so that block stays disabled.
+        if [ "${{ inputs.sublevel }}" -lt "157" ]; then
+          echo "Adjusting susfs base patch namespace.c hunk (drop blk.h context line absent from older sublevel sources)"
+          python3 "${{ github.workspace }}/.github/scripts/susfs_drop_blk_context.py" 50_add_susfs_in_gki-android14-6.1.patch
+        fi
         # -ge 157 blocks stay disabled (context removal breaks SUSFS patch context)
 
     - name: Apply Android 15 6.6 Fake Patches
