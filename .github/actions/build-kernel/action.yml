@@ -50,6 +50,49 @@ runs:
     #       exit 1
     #     fi
 
+    # dc: 2026-11-18. Deterministic failure of lib/oid_registry_data.c generation
+    # (runs 44151755642 etc.) for android14-6.1 sublevels 145/162/176:
+    #   Cwd.c: loadable library and perl binaries are mismatched
+    #   (got first handshake key 0xf380080, needed 0xeb80080)
+    # The kernel trees, superproject pins (build/kernel, clang, build-tools,
+    # kernel-build-tools, bazel), workflow steps and runner image are identical
+    # between the failing and succeeding jobs; the same jobs' step-level perl
+    # works. So the kleaf KernelBuild environment itself is what poisons the
+    # host perl (PERL5LIB / LD_LIBRARY_PATH / PATH shim vs system Cwd.so ABI).
+    # Fix at the exact failing invocation: run scripts/build_OID_registry with
+    # the absolute system perl, PERL env vars unset and an empty
+    # LD_LIBRARY_PATH. Assert-anchored + idempotent like the other dc patches;
+    # a missing anchor fails loudly instead of silently building unpatched.
+    - name: 'Sanitize host perl for lib/build_OID_registry'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel
+      run: |
+        set -euo pipefail
+        python3 - <<'PY'
+        import io, os
+        p = "common/lib/Makefile"
+        if not os.path.exists(p):
+            print(f"{p}: not present, nothing to sanitize")
+            raise SystemExit(0)
+        s = io.open(p, encoding="utf-8").read()
+        if "env -u PERL5LIB" in s:
+            print(f"{p}: sanitized host perl already applied")
+            raise SystemExit(0)
+        needle = "cmd_build_OID_registry = perl $(srctree)/$(src)/build_OID_registry"
+        count = s.count(needle)
+        assert count == 1, (
+            f"{p}: expected exactly 1 build_OID_registry perl recipe, found {count}"
+        )
+        repl = (
+            "cmd_build_OID_registry = env -u PERL5LIB -u PERLLIB -u PERL5OPT"
+            " -u PERL_USE_UNSAFE_INC LD_LIBRARY_PATH="
+            " /usr/bin/perl $(srctree)/$(src)/build_OID_registry"
+        )
+        s = s.replace(needle, repl, 1)
+        io.open(p, "w", encoding="utf-8", newline="\n").write(s)
+        print(f"{p}: build_OID_registry now runs sanitized /usr/bin/perl")
+        PY
+
     - name: 'Build Kernel'
       shell: bash
       working-directory: ${{ github.workspace }}/kernel
