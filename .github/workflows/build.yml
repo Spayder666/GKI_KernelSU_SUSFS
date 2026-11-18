@@ -325,6 +325,49 @@ jobs:
           sublevel: ${{ steps.extract.outputs.sublevel }}
           root_flavor: ${{ inputs.root_flavor }}
 
+      - name: Alias susfs_avc_spoof off the public default (post-susfs)
+        if: >-
+          (contains(inputs.feature_set, 'SUSFS') || inputs.feature_set == 'All') &&
+          inputs.root_flavor == 'next'
+        shell: bash
+        working-directory: ${{ github.workspace }}/kernel/KernelSU-Next
+        run: |
+          # The root-setup alias patch runs BEFORE this workflow's SUSFS step,
+          # and the SUSFS action copies susfs4ksu's kernel/susfs/* over the
+          # KernelSU-Next tree - clobbering the patched alias (run
+          # 44295096533: root-setup logged "priv-app alias moved", the built
+          # Image still carried the upstream literal). Re-apply AFTER SUSFS.
+          # The alias lands verbatim in auditd lines and DChecker 1135 greps
+          # app-readable auditd for the exact upstream literal
+          # "u:r:priv_app:s0:c512,c768" reporting "Fake tcontext: priv_app
+          # alias" + auditpatch runtime markers (lynx 2026-11-18).
+          # system_app is an in-policy AOSP domain that resolves at init.
+          python3 - <<'PY'
+          import io
+          p = "kernel/susfs/susfs_avc_spoof.c"
+          s = io.open(p, encoding="utf-8").read()
+          marker = "dc: priv-app alias off default"
+          if marker in s:
+              print("susfs_avc_spoof: alias already moved")
+          elif 'static char avc_priv_app_ctx[128] = "u:r:priv_app:s0:c512,c768";' in s:
+              new = (
+                  "/* dc: priv-app alias off default. The alias lands verbatim in\n"
+                  " * auditd lines and DChecker 1135 greps app-readable auditd for\n"
+                  " * the exact upstream literal \"u:r:priv_app:s0:c512,c768\"\n"
+                  " * reporting \"Fake tcontext: priv_app alias\" + auditpatch\n"
+                  " * runtime markers (lynx 2026-11-18). system_app is an in-policy\n"
+                  " * AOSP domain that resolves at init like priv_app did. */\n"
+                  'static char avc_priv_app_ctx[128] = "u:r:system_app:s0";'
+              )
+              s = s.replace(
+                  'static char avc_priv_app_ctx[128] = "u:r:priv_app:s0:c512,c768";',
+                  new, 1)
+              io.open(p, "w", encoding="utf-8", newline="\n").write(s)
+              print("susfs_avc_spoof: priv-app alias moved off the public default")
+          else:
+              raise SystemExit("susfs_avc_spoof: upstream alias default not found")
+          PY
+
       - name: Fix selinux_hide pointer-bool-conversion on 6.6+ (ALL branches)
         shell: bash
         run: |
