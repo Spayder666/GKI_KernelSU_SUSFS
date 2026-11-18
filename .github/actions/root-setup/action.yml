@@ -289,6 +289,49 @@ runs:
         print("selinux_hide: timing-coherent newline reject installed")
         PY
 
+    - name: Alias susfs_avc_spoof off the public default (next)
+      if: inputs.flavor == 'next'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/KernelSU-Next
+      run: |
+        # susfs_avc_spoof rewrites the su-domain sid in slow_avc_audit()
+        # registers, and the rendered record carries the alias context
+        # verbatim. The upstream default alias ("u:r:priv_app:s0:c512,c768")
+        # is the public SukiSU/susfs default, and DChecker 1135 greps the
+        # app-readable auditd lines for that exact literal and reports
+        # "Fake tcontext: priv_app alias" + auditpatch runtime markers
+        # (lynx 2026-11-18: both findings, one record). system_app is an
+        # in-policy AOSP domain that security_secctx_to_secid() resolves at
+        # init exactly like priv_app did, is not part of any known
+        # root-hiding signature list, and renders plausibly as a denial
+        # target. The feature still self-disables if the context does not
+        # resolve, same as upstream.
+        python3 - <<'PY'
+        import io
+        p = "kernel/susfs/susfs_avc_spoof.c"
+        s = io.open(p, encoding="utf-8").read()
+        marker = "dc: priv-app alias off default"
+        assert marker not in s, "susfs_avc_spoof: alias already moved"
+        anchor = (
+            'static char avc_priv_app_ctx[128] = "u:r:priv_app:s0:c512,c768";'
+        )
+        assert anchor in s, "susfs_avc_spoof: priv_app alias default not found"
+        new = (
+            "/* dc: priv-app alias off default. The alias lands verbatim in\n"
+            " * auditd lines (slow_avc_audit renders the rewritten sid) and\n"
+            " * DChecker 1135 greps app-readable auditd for the exact upstream\n"
+            " * literal \"u:r:priv_app:s0:c512,c768\" reporting \"Fake tcontext:\n"
+            " * priv_app alias\" + auditpatch runtime markers (lynx\n"
+            " * 2026-11-18). system_app is an in-policy AOSP domain that\n"
+            " * resolves at init like priv_app did; the feature still\n"
+            " * self-disables when the context does not resolve. */\n"
+            "static char avc_priv_app_ctx[128] = \"u:r:system_app:s0\";"
+        )
+        s = s.replace(anchor, new, 1)
+        io.open(p, "w", encoding="utf-8", newline="\n").write(s)
+        print("susfs_avc_spoof: priv-app alias moved off the public default")
+        PY
+
     - name: Disable multi-manager for BakaSU
       if: inputs.flavor == 'bakasu'
       uses: ./.github/actions/set-kernel-config
