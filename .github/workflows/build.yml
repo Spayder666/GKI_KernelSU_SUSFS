@@ -367,6 +367,29 @@ jobs:
           else:
               raise SystemExit("susfs_avc_spoof: upstream alias default not found")
           PY
+          # kernel/extras.c carries the SECOND built-in avc spoof (ksu
+          # security hook, always compiled) with the same upstream literal -
+          # patch it too, same alias.
+          python3 - <<'PY2'
+          import io
+          p2 = "kernel/extras.c"
+          s2 = io.open(p2, encoding="utf-8").read()
+          if "dc: extras alias moved" in s2:
+              print("extras.c: alias already moved")
+          elif 'ksu_security_secctx_to_secid("u:r:priv_app:s0:c512,c768"' in s2:
+              s2 = s2.replace(
+                  'ksu_security_secctx_to_secid("u:r:priv_app:s0:c512,c768"',
+                  '/* dc: extras alias moved */ ksu_security_secctx_to_secid("u:r:system_app:s0"',
+                  1)
+              s2 = s2.replace(
+                  '"u:r:priv_app:s0:c512,c768", strlen("u:r:priv_app:s0:c512,c768"',
+                  '"u:r:system_app:s0", strlen("u:r:system_app:s0"',
+                  1)
+              io.open(p2, "w", encoding="utf-8").write(s2)
+              print("extras.c: priv-app alias moved off the public default")
+          else:
+              print("extras.c: no upstream literal - skip")
+          PY2
 
       - name: Fix selinux_hide pointer-bool-conversion on 6.6+ (ALL branches)
         shell: bash
