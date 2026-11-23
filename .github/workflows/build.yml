@@ -408,19 +408,21 @@ jobs:
           # exist (Duck 1118 "ksu_types timing", Pixel 6a 2026-11-23:
           # u:object_r:ksu_file:s0 slower in 98% of pairs).
           #
-          # Answering the same nodes from the backup policy closes that
-          # channel and opens the opposite one: those tables are cold, the
-          # name-dependent chain walks inflate to hundreds of ns and KSU
-          # names came out FASTER than invalid ones (A<B 10945/13500).
+          # Nothing decided after the hit is free: answering from the backup
+          # policy walks cold tables, where the name-dependent chain
+          # differences inflate tenfold and come out reversed (A<B
+          # 10945/13500, Duck Danger); deciding on the name instead, even as
+          # an inlined byte loop, still costs 20..40 ns more than a miss -
+          # a narrower oracle of the same shape.
           #
-          # So keep the live (warm) parse and make an added type a plain
-          # miss, decided on the NAME the lookup has just compared (hot
-          # line). The decision itself has to be free: an out-of-line
-          # strcmp() check still left the hidden name 40..120 ns slower, a
-          # leaf byte loop 20..35 ns. Hence the registry lives in this file
-          # and the check is __always_inline: a byte walk, no call, no
-          # extra line, no datum read. KSU names then cost what they cost
-          # on a stock kernel, where they were never in the table.
+          # So the app-uid parse does not find the type in the first place:
+          # it looks names up in a second copy of the type table without the
+          # added types, rebuilt after every KernelSU policy commit (both
+          # commit sites in kernel/selinux/rules.c run under
+          # selinux_state.policy_mutex, before the previous policy is
+          # destroyed). An added name is then a miss produced by the same
+          # lookup code as any other unknown name, at the cost it has on a
+          # stock kernel, where it was never in the table.
           #
           # Second change, same handler: a leading-newline context skips
           # the parse, which is cheaper than any parsed context. Run it
@@ -433,18 +435,22 @@ jobs:
 
           MARK = "dc: added SELinux types"
 
+
           def load(p):
               return io.open(p, encoding="utf-8").read()
+
 
           def save(p, s):
               io.open(p, "w", encoding="utf-8", newline="\n").write(s)
 
-          def once(s, old, new, label):
-              if s.count(old) != 1:
+
+          def once(s, old, new, label, count=1):
+              if s.count(old) != count:
                   raise SystemExit("%s: anchor count %d" % (label, s.count(old)))
               return s.replace(old, new)
 
-          # --- KernelSU-Next: report every type it adds ----------------------
+
+          # --- KernelSU-Next: report every type it adds --------------------------
           p = "kernel/KernelSU-Next/kernel/selinux/sepolicy.c"
           s = load(p)
           if MARK in s:
@@ -452,28 +458,187 @@ jobs:
           else:
               s = once(
                   s,
-                  "bool ksu_type(struct policydb *db, const char *name, const char *attr)\n"
-                  "{\n"
-                  "    return add_type(db, name, false) && add_typeattribute(db, name, attr);\n"
-                  "}\n",
-                  "/* dc: added SELinux types. The app-uid SELinux context parse treats\n"
-                  " * a type KernelSU added as unknown; the registry of those names\n"
-                  " * lives next to that parse (security/selinux/ss/services.c), so\n"
-                  " * that its check can be inlined. */\n"
+                  "static bool add_type(struct policydb *db, const char *type_name, bool attr)\n"
+                  "{\n",
+                  "/* dc: added SELinux types. The app-uid context parse answers a type\n"
+                  " * added here as unknown. It is told the name from add_type, below,\n"
+                  " * and rebuilds its view of the type table after the policy commit\n"
+                  " * (ksu_rebuild_type_view, kernel/selinux/rules.c). */\n"
                   "extern void ksu_note_added_type(const char *name);\n"
                   "\n"
-                  "bool ksu_type(struct policydb *db, const char *name, const char *attr)\n"
-                  "{\n"
-                  "    if (!add_type(db, name, false) || !add_typeattribute(db, name, attr))\n"
-                  "        return false;\n"
-                  "    ksu_note_added_type(name);\n"
-                  "    return true;\n"
-                  "}\n",
-                  "ksu_type")
+                  "static bool add_type(struct policydb *db, const char *type_name, bool attr)\n"
+                  "{\n",
+                  "add_type definition")
+              s = once(
+                  s,
+                  "    susfs_add_sus_type(type_name, type->value);\n",
+                  "    susfs_add_sus_type(type_name, type->value);\n"
+                  "    ksu_note_added_type(type_name);\n",
+                  "add_type sus_type note")
               save(p, s)
-              print(p + ": ksu_type reports added types")
+              print(p + ": add_type reports added types")
 
-          # --- susfs parse: added type = plain miss, free decision -----------
+          # --- KernelSU-Next: rebuild the view after every policy commit ---------
+          p = "kernel/KernelSU-Next/kernel/selinux/rules.c"
+          s = load(p)
+          if MARK in s:
+              print(p + ": already patched")
+          else:
+              s = once(
+                  s,
+                  "void apply_kernelsu_rules()\n",
+                  "/* dc: added SELinux types. Rebuild the app view of the type table\n"
+                  " * from the policy that was just published (see sepolicy.c). */\n"
+                  "#ifdef CONFIG_KSU_SUSFS\n"
+                  "extern void ksu_rebuild_type_view(struct policydb *policydb);\n"
+                  "#endif\n"
+                  "\n"
+                  "void apply_kernelsu_rules()\n",
+                  "apply_kernelsu_rules")
+              s = once(
+                  s,
+                  "    rcu_assign_pointer(selinux_state.policy, pol);\n",
+                  "    rcu_assign_pointer(selinux_state.policy, pol);\n"
+                  "#ifdef CONFIG_KSU_SUSFS\n"
+                  "    ksu_rebuild_type_view(&pol->policydb);\n"
+                  "#endif\n",
+                  "policy commit", 2)
+              save(p, s)
+              print(p + ": type view rebuilt after each policy commit")
+
+          # --- susfs parse: the app view of the type table -----------------------
+          SERVICES = (
+              "/* dc: added SELinux types. Names of the types KernelSU added to the policy\n"
+              " * (ksu_note_added_type, called from add_type). The app-uid context parse\n"
+              " * treats them as unknown, and that must not be observable:\n"
+              " *  - rejecting the type after the lookup found it reads the datum and the\n"
+              " *    susfs hash line, a cold line each, 27..60 ns more than a name that\n"
+              " *    does not exist (Duck 1118 \"ksu_types timing\", Pixel 6a 2026-11-23);\n"
+              " *  - deciding on the name instead still costs 20..40 ns more than a miss,\n"
+              " *    even as an inlined byte loop: a narrower oracle of the same shape;\n"
+              " *  - answering from the backup policy walks cold tables, where the\n"
+              " *    name-dependent chain differences inflate tenfold and come out\n"
+              " *    reversed (A<B 10945/13500, Duck Danger).\n"
+              " * So the app-uid parse looks names up in a second copy of the type table\n"
+              " * that does not contain the added types (ksu_rebuild_type_view, run after\n"
+              " * every KernelSU policy commit). An added name is then a miss produced by\n"
+              " * the same lookup code as any other unknown name, at the cost it has on a\n"
+              " * stock kernel, where it was never in the table. Without a view for the\n"
+              " * current policy (not built yet, or the build failed) the lookup falls\n"
+              " * back to the live table and decides on the name. */\n"
+              "#define DC_ADDED_TYPES_MAX 32\n"
+              "#define DC_ADDED_TYPES_NAME 32\n"
+              "static char dc_added_types[DC_ADDED_TYPES_MAX][DC_ADDED_TYPES_NAME];\n"
+              "static u32 dc_added_types_n;\n"
+              "\n"
+              "struct dc_type_view {\n"
+              "\tstruct policydb *pol;\t/* the policy the view was built from */\n"
+              "\tstruct symtab types;\t/* its type table without the added types */\n"
+              "};\n"
+              "static struct dc_type_view *dc_type_view __read_mostly;\n"
+              "\n"
+              "static bool dc_type_name_is_added(const char *name)\n"
+              "{\n"
+              "\tconst char *e, *k;\n"
+              "\tu32 i, n = READ_ONCE(dc_added_types_n);\n"
+              "\n"
+              "\tfor (i = 0; i < n; i++) {\n"
+              "\t\te = dc_added_types[i];\n"
+              "\t\tk = name;\n"
+              "\t\twhile (*e && *k == *e) {\n"
+              "\t\t\tk++;\n"
+              "\t\t\te++;\n"
+              "\t\t}\n"
+              "\t\tif (!*e && !*k)\n"
+              "\t\t\treturn true;\n"
+              "\t}\n"
+              "\treturn false;\n"
+              "}\n"
+              "\n"
+              "void ksu_note_added_type(const char *name)\n"
+              "{\n"
+              "\tconst char *e;\n"
+              "\tu32 i, j, n;\n"
+              "\n"
+              "\tif (!name || !name[0])\n"
+              "\t\treturn;\n"
+              "\tn = READ_ONCE(dc_added_types_n);\n"
+              "\tfor (i = 0; i < n; i++) {\n"
+              "\t\te = dc_added_types[i];\n"
+              "\t\tfor (j = 0; j < DC_ADDED_TYPES_NAME - 1 && name[j] &&\n"
+              "\t\t     name[j] == e[j]; j++)\n"
+              "\t\t\t;\n"
+              "\t\tif (j == DC_ADDED_TYPES_NAME - 1 || (!name[j] && !e[j]))\n"
+              "\t\t\treturn;\n"
+              "\t}\n"
+              "\tif (n >= DC_ADDED_TYPES_MAX)\n"
+              "\t\treturn;\n"
+              "\tfor (j = 0; j < DC_ADDED_TYPES_NAME - 1 && name[j]; j++)\n"
+              "\t\tdc_added_types[n][j] = name[j];\n"
+              "\tdc_added_types[n][j] = '\\0';\n"
+              "\tWRITE_ONCE(dc_added_types_n, n + 1);\n"
+              "}\n"
+              "\n"
+              "static __always_inline struct type_datum *dc_app_type_lookup(struct policydb *pol,\n"
+              "\t\t\t\t\t\t\t     const char *name)\n"
+              "{\n"
+              "\tstruct dc_type_view *v = READ_ONCE(dc_type_view);\n"
+              "\tstruct type_datum *typdatum;\n"
+              "\n"
+              "\tif (v && v->pol == pol)\n"
+              "\t\treturn symtab_search(&v->types, name);\n"
+              "\n"
+              "\ttypdatum = symtab_search(&pol->p_types, name);\n"
+              "\tif (typdatum && __builtin_expect(dc_type_name_is_added(name), 0))\n"
+              "\t\treturn NULL;\n"
+              "\treturn typdatum;\n"
+              "}\n"
+              "\n"
+              "/* Called with selinux_state.policy_mutex held, right after KernelSU\n"
+              " * publishes a policy and before it destroys the previous one. */\n"
+              "void ksu_rebuild_type_view(struct policydb *pol)\n"
+              "{\n"
+              "\tstruct dc_type_view *v, *old;\n"
+              "\tstruct hashtab_node *node;\n"
+              "\tu32 i;\n"
+              "\n"
+              "\tv = kzalloc(sizeof(*v), GFP_KERNEL);\n"
+              "\tif (!v)\n"
+              "\t\tgoto publish;\n"
+              "\tif (symtab_init(&v->types, pol->p_types.table.size))\n"
+              "\t\tgoto free;\n"
+              "\tfor (i = 0; i < pol->p_types.table.size; i++) {\n"
+              "\t\tfor (node = pol->p_types.table.htable[i]; node; node = node->next) {\n"
+              "\t\t\tif (dc_type_name_is_added(node->key))\n"
+              "\t\t\t\tcontinue;\n"
+              "\t\t\tif (symtab_insert(&v->types, node->key, node->datum))\n"
+              "\t\t\t\tgoto destroy;\n"
+              "\t\t}\n"
+              "\t}\n"
+              "\tv->pol = pol;\n"
+              "\tgoto publish;\n"
+              "\n"
+              "destroy:\n"
+              "\thashtab_destroy(&v->types.table);\n"
+              "free:\n"
+              "\tkfree(v);\n"
+              "\tv = NULL;\n"
+              "publish:\n"
+              "\t/* The previous view points into the policy being retired, so it goes\n"
+              "\t * down even when the new one could not be built; the lookup then\n"
+              "\t * falls back to the live table. */\n"
+              "\told = rcu_dereference_protected(dc_type_view,\n"
+              "\t\t\t\t\tlockdep_is_held(&selinux_state.policy_mutex));\n"
+              "\trcu_assign_pointer(dc_type_view, v);\n"
+              "\tif (old) {\n"
+              "\t\tsynchronize_rcu();\n"
+              "\t\thashtab_destroy(&old->types.table);\n"
+              "\t\tkfree(old);\n"
+              "\t}\n"
+              "}\n"
+              "\n"
+          )
+
           p = "kernel/common/security/selinux/ss/services.c"
           s = load(p)
           if MARK in s:
@@ -482,78 +647,22 @@ jobs:
               s = once(
                   s,
                   "static int susfs_string_to_context_struct(struct policydb *pol,\n",
-                  "/* dc: added SELinux types. Names of the types KernelSU added to the\n"
-                  " * policy (ksu_note_added_type, called from ksu_type). The app-uid\n"
-                  " * parse below treats them as unknown, and that decision has to\n"
-                  " * cost what a lookup miss costs: no datum read (a cold line per\n"
-                  " * hidden type), no strcmp() call, no call at all. Each of those\n"
-                  " * left a hidden name 20..120 ns slower than an unknown name -\n"
-                  " * the \"ksu_types timing\" oracle (Duck 1118, 2026-11-23). */\n"
-                  "#define DC_ADDED_TYPES_MAX 8\n"
-                  "#define DC_ADDED_TYPES_NAME 16\n"
-                  "static char dc_added_types[DC_ADDED_TYPES_MAX][DC_ADDED_TYPES_NAME];\n"
-                  "static u32 dc_added_types_n;\n"
-                  "\n"
-                  "void ksu_note_added_type(const char *name)\n"
-                  "{\n"
-                  "\tconst char *e;\n"
-                  "\tu32 i, j, n;\n"
-                  "\n"
-                  "\tif (!name || !name[0])\n"
-                  "\t\treturn;\n"
-                  "\tn = READ_ONCE(dc_added_types_n);\n"
-                  "\tfor (i = 0; i < n; i++) {\n"
-                  "\t\te = dc_added_types[i];\n"
-                  "\t\tfor (j = 0; j < DC_ADDED_TYPES_NAME - 1 && name[j] &&\n"
-                  "\t\t     name[j] == e[j]; j++)\n"
-                  "\t\t\t;\n"
-                  "\t\tif (j == DC_ADDED_TYPES_NAME - 1 || !name[j])\n"
-                  "\t\t\treturn;\n"
-                  "\t}\n"
-                  "\tif (n >= DC_ADDED_TYPES_MAX)\n"
-                  "\t\treturn;\n"
-                  "\tfor (j = 0; j < DC_ADDED_TYPES_NAME - 1 && name[j]; j++)\n"
-                  "\t\tdc_added_types[n][j] = name[j];\n"
-                  "\tdc_added_types[n][j] = '\\0';\n"
-                  "\tWRITE_ONCE(dc_added_types_n, n + 1);\n"
-                  "}\n"
-                  "\n"
-                  "static __always_inline bool dc_type_name_is_added(const char *name)\n"
-                  "{\n"
-                  "\tconst char *e, *k;\n"
-                  "\tu32 i, n = READ_ONCE(dc_added_types_n);\n"
-                  "\n"
-                  "\tfor (i = 0; i < n; i++) {\n"
-                  "\t\te = dc_added_types[i];\n"
-                  "\t\tk = name;\n"
-                  "\t\twhile (*e && *k == *e) {\n"
-                  "\t\t\tk++;\n"
-                  "\t\t\te++;\n"
-                  "\t\t}\n"
-                  "\t\tif (!*e)\n"
-                  "\t\t\treturn true;\n"
-                  "\t}\n"
-                  "\treturn false;\n"
-                  "}\n"
-                  "\n"
+                  SERVICES +
                   "static int susfs_string_to_context_struct(struct policydb *pol,\n",
                   "registry placement")
               s = once(
                   s,
-                  "\tif (typdatum && !typdatum->attribute) {\n"
-                  "\t\tif (likely(susfs_is_sus_type_rcu(typdatum->value)))\n"
-                  "\t\t\tgoto out;\n"
-                  "\t\tgoto orig_flow;\n"
-                  "\t}\n",
-                  "\t/* dc: added SELinux types are unknown to app uids, decided on\n"
-                  "\t * the name the lookup has just compared (hot line). */\n"
-                  "\tif (typdatum && __builtin_expect(dc_type_name_is_added(scontextp), 0))\n"
-                  "\t\tgoto out;\n"
-                  "\tif (typdatum && !typdatum->attribute)\n"
-                  "\t\tgoto orig_flow;\n",
-                  "susfs type check")
+                  "\ttypdatum = symtab_search(&pol->p_types, scontextp);\n"
+                  "\n"
+                  "\tif (typdatum && !typdatum->attribute) {\n",
+                  "\t/* dc: added SELinux types are unknown to app uids: a plain miss\n"
+                  "\t * of the app view of the type table. */\n"
+                  "\ttypdatum = dc_app_type_lookup(pol, scontextp);\n"
+                  "\n"
+                  "\tif (typdatum && !typdatum->attribute) {\n",
+                  "susfs type lookup")
               save(p, s)
-              print(p + ": added types answer as unknown for app uids")
+              print(p + ": added types are absent from the app view of the type table")
 
           # --- susfs setprocattr: newline class pays the wrapped parse -------
           p = "kernel/common/security/selinux/hooks.c"
