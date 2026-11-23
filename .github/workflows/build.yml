@@ -391,6 +391,197 @@ jobs:
               print("extras.c: no upstream literal - skip")
           PY2
 
+      - name: Hide added SELinux types from app context parses (post-susfs, next)
+        if: >-
+          (contains(inputs.feature_set, 'SUSFS') || inputs.feature_set == 'All') &&
+          inputs.root_flavor == 'next'
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          # App-uid SELinux context queries (/proc/*/attr/current,
+          # /sys/fs/selinux/context, /sys/fs/selinux/access) go through the
+          # susfs copies of the stock handlers. Those parse the LIVE policy
+          # and reject a type KernelSU added only after finding it:
+          #   symtab_search hit -> typdatum->value -> susfs_is_sus_type_rcu()
+          # The datum and the susfs hash line are a cold cache line each, so
+          # a hidden type costs 27..60 ns more than a name that does not
+          # exist (Duck 1118 "ksu_types timing", Pixel 6a 2026-11-23:
+          # u:object_r:ksu_file:s0 slower in 98% of pairs). Answering the
+          # same nodes from the backup policy closes that channel but opens
+          # the opposite one: the backup tables are cold, name-dependent
+          # chain walks inflate to hundreds of ns and KSU names came out
+          # FASTER than invalid ones (A<B 10945/13500, Duck Danger).
+          #
+          # So keep the live (warm) parse and make an added type a plain
+          # miss: decide on the NAME, which the lookup has just compared
+          # (hot), instead of the datum. KernelSU-Next records the names of
+          # the types it adds (ksu_type), the susfs parse consults that
+          # list only after a hit. A KSU name then costs what it costs on a
+          # stock kernel, where it was never in the table.
+          #
+          # Second change, same handler: a leading-newline context skips
+          # the parse, which is cheaper than any parsed context. Run it
+          # through the same parse as the context it wraps (first byte read
+          # as 'u') before the stock skip path; the verdict is unchanged.
+          # DChecker's "App Zygote attr/current timing" signs that pair and
+          # flipped Danger/Clear on +-1 tick around zero.
+          python3 - <<'PY'
+          import io
+
+          MARK = "dc: added SELinux types"
+
+          def load(p):
+              return io.open(p, encoding="utf-8").read()
+
+          def save(p, s):
+              io.open(p, "w", encoding="utf-8", newline="\n").write(s)
+
+          def once(s, old, new, label):
+              if s.count(old) != 1:
+                  raise SystemExit("%s: anchor count %d" % (label, s.count(old)))
+              return s.replace(old, new)
+
+          # --- KernelSU-Next: registry of the type names it adds -------------
+          p = "kernel/KernelSU-Next/kernel/selinux/sepolicy.c"
+          s = load(p)
+          if MARK in s:
+              print(p + ": already patched")
+          else:
+              s = once(
+                  s,
+                  "bool ksu_type(struct policydb *db, const char *name, const char *attr)\n"
+                  "{\n"
+                  "    return add_type(db, name, false) && add_typeattribute(db, name, attr);\n"
+                  "}\n",
+                  "/* dc: added SELinux types. Names of the types KernelSU added to the\n"
+                  " * policy. The app-uid context parse treats them as unknown and must\n"
+                  " * not read their datum (a cold line per hidden type is the\n"
+                  " * \"ksu_types timing\" oracle, Duck 1118 2026-11-23), so it decides\n"
+                  " * on the name. */\n"
+                  "#define KSU_ADDED_TYPES_MAX 16\n"
+                  "#define KSU_ADDED_TYPES_NAME 48\n"
+                  "static char ksu_added_types[KSU_ADDED_TYPES_MAX][KSU_ADDED_TYPES_NAME];\n"
+                  "static u32 ksu_added_types_n;\n"
+                  "\n"
+                  "static void ksu_note_added_type(const char *name)\n"
+                  "{\n"
+                  "    u32 i, n;\n"
+                  "\n"
+                  "    if (!name || !name[0] || strlen(name) >= KSU_ADDED_TYPES_NAME)\n"
+                  "        return;\n"
+                  "    n = READ_ONCE(ksu_added_types_n);\n"
+                  "    for (i = 0; i < n; i++) {\n"
+                  "        if (!strcmp(ksu_added_types[i], name))\n"
+                  "            return;\n"
+                  "    }\n"
+                  "    if (n >= KSU_ADDED_TYPES_MAX)\n"
+                  "        return;\n"
+                  "    memcpy(ksu_added_types[n], name, strlen(name) + 1);\n"
+                  "    WRITE_ONCE(ksu_added_types_n, n + 1);\n"
+                  "}\n"
+                  "\n"
+                  "bool ksu_type_name_is_added(const char *name)\n"
+                  "{\n"
+                  "    u32 i, n = READ_ONCE(ksu_added_types_n);\n"
+                  "\n"
+                  "    for (i = 0; i < n; i++) {\n"
+                  "        if (!strcmp(ksu_added_types[i], name))\n"
+                  "            return true;\n"
+                  "    }\n"
+                  "    return false;\n"
+                  "}\n"
+                  "\n"
+                  "bool ksu_type(struct policydb *db, const char *name, const char *attr)\n"
+                  "{\n"
+                  "    if (!add_type(db, name, false) || !add_typeattribute(db, name, attr))\n"
+                  "        return false;\n"
+                  "    ksu_note_added_type(name);\n"
+                  "    return true;\n"
+                  "}\n",
+                  "ksu_type")
+              s = once(
+                  s,
+                  "#include <linux/slab.h>
+#include <linux/printk.h>
+",
+                  "#include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/printk.h>
+",
+                  "sepolicy includes")
+              save(p, s)
+              print(p + ": added-type registry installed")
+
+          # --- susfs parse: added type = plain miss, decided on the name -----
+          p = "kernel/common/security/selinux/ss/services.c"
+          s = load(p)
+          if MARK in s:
+              print(p + ": already patched")
+          else:
+              s = once(
+                  s,
+                  "\tif (typdatum && !typdatum->attribute) {\n"
+                  "\t\tif (likely(susfs_is_sus_type_rcu(typdatum->value)))\n"
+                  "\t\t\tgoto out;\n"
+                  "\t\tgoto orig_flow;\n"
+                  "\t}\n",
+                  "\t/* dc: added SELinux types are unknown to app uids. Decide on\n"
+                  "\t * the name: the key line is hot from the lookup, the datum\n"
+                  "\t * would be a cold line per hidden type, and that line is the\n"
+                  "\t * \"ksu_types timing\" oracle (Duck 1118, 2026-11-23). */\n"
+                  "\tif (typdatum && ksu_type_name_is_added(scontextp))\n"
+                  "\t\tgoto out;\n"
+                  "\tif (typdatum && !typdatum->attribute)\n"
+                  "\t\tgoto orig_flow;\n",
+                  "susfs type check")
+              s = once(
+                  s,
+                  "extern bool susfs_is_sus_type_rcu(u32 sid);\n",
+                  "extern bool susfs_is_sus_type_rcu(u32 sid);\n"
+                  "extern bool ksu_type_name_is_added(const char *name);\n",
+                  "services extern")
+              save(p, s)
+              print(p + ": added types answer as unknown for app uids")
+
+          # --- susfs setprocattr: newline class pays the wrapped parse -------
+          p = "kernel/common/security/selinux/hooks.c"
+          s = load(p)
+          if MARK in s:
+              print(p + ": already patched")
+          else:
+              fn = s.find("static int susfs_selinux_setprocattr(")
+              if fn < 0 or s.count("static int susfs_selinux_setprocattr(") != 1:
+                  raise SystemExit("susfs setprocattr anchor missing")
+              comment = "\t/* Obtain a SID for the context, if one was specified. */\n"
+              at = s.find(comment, fn)
+              if at < 0:
+                  raise SystemExit("susfs setprocattr: SID comment not found")
+              gate = (
+                  "\t/* dc: added SELinux types, newline class. A leading-newline\n"
+                  "\t * context skips the parse below, which makes it cheaper than\n"
+                  "\t * any parsed context. Run it through the same parse as the\n"
+                  "\t * context it wraps (first byte read as 'u') before the stock\n"
+                  "\t * skip path. The verdict is unchanged: sid stays 0. */\n"
+                  "\tif (size && str[0] == '\\n') {\n"
+                  "\t\tu32 dc_len = size;\n"
+                  "\n"
+                  "\t\tif (str[dc_len - 1] == '\\n')\n"
+                  "\t\t\tdc_len--;\n"
+                  "\t\tif (dc_len) {\n"
+                  "\t\t\tstr[0] = 'u';\n"
+                  "\t\t\tsusfs_security_context_to_sid(&selinux_state, str,\n"
+                  "\t\t\t\t\t\t      dc_len, &sid, GFP_KERNEL);\n"
+                  "\t\t\tstr[0] = '\\n';\n"
+                  "\t\t\tsid = 0;\n"
+                  "\t\t}\n"
+                  "\t}\n"
+                  "\n"
+              )
+              s = s[:at] + gate + s[at:]
+              save(p, s)
+              print(p + ": newline class pays the wrapped parse")
+          PY
+
       - name: Fix selinux_hide pointer-bool-conversion on 6.6+ (ALL branches)
         shell: bash
         run: |
