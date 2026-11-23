@@ -391,6 +391,78 @@ jobs:
               print("extras.c: no upstream literal - skip")
           PY2
 
+      - name: Route app SELinux context oracles through the backup policy (post-susfs, next)
+        if: >-
+          (contains(inputs.feature_set, 'SUSFS') || inputs.feature_set == 'All') &&
+          inputs.root_flavor == 'next'
+        shell: bash
+        working-directory: ${{ github.workspace }}/kernel/common
+        run: |
+          # The susfs 50_add patch answers app-uid SELinux context queries
+          # (/proc/*/attr/current, /sys/fs/selinux/context, /sys/fs/selinux/access)
+          # from its own copies of the stock handlers. Those parse the LIVE
+          # policy and reject a KSU type only after finding it (symtab_search
+          # hit -> susfs_is_sus_type_rcu), so a hidden type costs more than a
+          # name that does not exist. That is the "ksu_types timing" oracle
+          # (Duck 1118, Pixel 6a 2026-11-23, KPM out of the way:
+          # u:object_r:ksu_file:s0 +60 ns in 98% of pairs, u:r:ksu:s0 +27..44 ns
+          # in 80%). KernelSU-Next's selinux_hide already carries the
+          # stock-shaped implementation for all three nodes - my_setprocattr,
+          # my_write_context and my_write_access parse the backup policy, where
+          # KSU types do not exist and a KSU name takes the same miss as any
+          # other unknown name - but under CONFIG_KSU_SUSFS it is never wired
+          # in. Route the app-uid arm of each handler there and drop the
+          # inlined live-policy copies. Root and non-current writes keep the
+          # stock handlers, as before.
+          python3 - <<'PY'
+          import io
+
+          MARK = "/* dc: app SELinux context oracles answer from the backup policy */\n"
+
+          def route(path, dead, keep, calls, extern_after, externs):
+              s = io.open(path, encoding="utf-8").read()
+              if MARK in s:
+                  print(path + ": already routed through the backup policy")
+                  return
+              for d, k in zip(dead, keep):
+                  if s.count(d) != 1 or s.count(k) != 1:
+                      raise SystemExit("%s: live-policy copy anchor %d/%d" % (path, s.count(d), s.count(k)))
+                  a, b = s.index(d), s.index(k)
+                  if b <= a:
+                      raise SystemExit("%s: handler precedes its live-policy copy" % path)
+                  s = s[:a] + s[b:]
+              for old, new in calls:
+                  if s.count(old) != 1:
+                      raise SystemExit("%s: call anchor %d for %s" % (path, s.count(old), old))
+                  s = s.replace(old, new)
+              if s.count(extern_after) != 1:
+                  raise SystemExit("%s: extern anchor %d" % (path, s.count(extern_after)))
+              s = s.replace(extern_after, extern_after + MARK + "".join(externs), 1)
+              io.open(path, "w", encoding="utf-8", newline="\n").write(s)
+              print(path + ": app-uid arm routed through the backup policy")
+
+          route("security/selinux/hooks.c",
+                ["static int susfs_selinux_setprocattr(const char *name, void *value, size_t size)\n"],
+                ["static int handle_selinux_setprocattr(const char *name, void *value, size_t size)\n"],
+                [("return susfs_selinux_setprocattr(name, value, size);",
+                  "return my_setprocattr(name, value, size);")],
+                "extern bool ksu_selinux_hide_running __read_mostly;\n",
+                ["extern int my_setprocattr(const char *name, void *value, size_t size);\n"])
+
+          route("security/selinux/selinuxfs.c",
+                ["static ssize_t susfs_sel_write_context(struct file *file, char *buf, size_t size)\n",
+                 "static ssize_t susfs_sel_write_access(struct file *file, char *buf, size_t size)\n"],
+                ["static ssize_t handle_sel_write_context(struct file *file, char *buf, size_t size) {\n",
+                 "static ssize_t handle_sel_write_access(struct file *file, char *buf, size_t size)\n{\n"],
+                [("return susfs_sel_write_context(file, buf, size);",
+                  "return my_write_context(file, buf, size);"),
+                 ("return susfs_sel_write_access(file, buf, size);",
+                  "return my_write_access(file, buf, size);")],
+                "extern bool ksu_selinux_hide_enabled __read_mostly;\n",
+                ["extern ssize_t my_write_context(struct file *file, char *buf, size_t size);\n",
+                 "extern ssize_t my_write_access(struct file *file, char *buf, size_t size);\n"])
+          PY
+
       - name: Fix selinux_hide pointer-bool-conversion on 6.6+ (ALL branches)
         shell: bash
         run: |
