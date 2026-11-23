@@ -406,18 +406,21 @@ jobs:
           # The datum and the susfs hash line are a cold cache line each, so
           # a hidden type costs 27..60 ns more than a name that does not
           # exist (Duck 1118 "ksu_types timing", Pixel 6a 2026-11-23:
-          # u:object_r:ksu_file:s0 slower in 98% of pairs). Answering the
-          # same nodes from the backup policy closes that channel but opens
-          # the opposite one: the backup tables are cold, name-dependent
-          # chain walks inflate to hundreds of ns and KSU names came out
-          # FASTER than invalid ones (A<B 10945/13500, Duck Danger).
+          # u:object_r:ksu_file:s0 slower in 98% of pairs).
+          #
+          # Answering the same nodes from the backup policy closes that
+          # channel and opens the opposite one: those tables are cold, the
+          # name-dependent chain walks inflate to hundreds of ns and KSU
+          # names came out FASTER than invalid ones (A<B 10945/13500).
           #
           # So keep the live (warm) parse and make an added type a plain
-          # miss: decide on the NAME, which the lookup has just compared
-          # (hot), instead of the datum. KernelSU-Next records the names of
-          # the types it adds (ksu_type), the susfs parse consults that
-          # list only after a hit. A KSU name then costs what it costs on a
-          # stock kernel, where it was never in the table.
+          # miss, decided on the NAME the lookup has just compared (hot
+          # line). The decision itself has to be free: an out-of-line
+          # strcmp() check still left the hidden name 40..120 ns slower, a
+          # leaf byte loop 20..35 ns. Hence the registry lives in this file
+          # and the check is __always_inline: a byte walk, no call, no
+          # extra line, no datum read. KSU names then cost what they cost
+          # on a stock kernel, where they were never in the table.
           #
           # Second change, same handler: a leading-newline context skips
           # the parse, which is cheaper than any parsed context. Run it
@@ -441,7 +444,7 @@ jobs:
                   raise SystemExit("%s: anchor count %d" % (label, s.count(old)))
               return s.replace(old, new)
 
-          # --- KernelSU-Next: registry of the type names it adds -------------
+          # --- KernelSU-Next: report every type it adds ----------------------
           p = "kernel/KernelSU-Next/kernel/selinux/sepolicy.c"
           s = load(p)
           if MARK in s:
@@ -453,57 +456,11 @@ jobs:
                   "{\n"
                   "    return add_type(db, name, false) && add_typeattribute(db, name, attr);\n"
                   "}\n",
-                  "/* dc: added SELinux types. Names of the types KernelSU added to the\n"
-                  " * policy. The app-uid context parse treats them as unknown, and that\n"
-                  " * decision has to cost what a lookup miss costs: no datum read (a\n"
-                  " * cold line per hidden type) and no strcmp call. Either one left a\n"
-                  " * hidden name 40..120 ns slower than an unknown name, which is the\n"
-                  " * \"ksu_types timing\" oracle (Duck 1118, 2026-11-23). A byte loop\n"
-                  " * over the key line the lookup has just read is a few ns. */\n"
-                  "#define KSU_ADDED_TYPES_MAX 8\n"
-                  "#define KSU_ADDED_TYPES_NAME 16\n"
-                  "static char ksu_added_types[KSU_ADDED_TYPES_MAX][KSU_ADDED_TYPES_NAME];\n"
-                  "static u32 ksu_added_types_n;\n"
-                  "\n"
-                  "static void ksu_note_added_type(const char *name)\n"
-                  "{\n"
-                  "    size_t len;\n"
-                  "    u32 i, n;\n"
-                  "\n"
-                  "    if (!name || !name[0])\n"
-                  "        return;\n"
-                  "    len = strlen(name);\n"
-                  "    if (len >= KSU_ADDED_TYPES_NAME)\n"
-                  "        len = KSU_ADDED_TYPES_NAME - 1;\n"
-                  "    n = READ_ONCE(ksu_added_types_n);\n"
-                  "    for (i = 0; i < n; i++) {\n"
-                  "        if (!strncmp(ksu_added_types[i], name, KSU_ADDED_TYPES_NAME - 1))\n"
-                  "            return;\n"
-                  "    }\n"
-                  "    if (n >= KSU_ADDED_TYPES_MAX)\n"
-                  "        return;\n"
-                  "    memcpy(ksu_added_types[n], name, len);\n"
-                  "    ksu_added_types[n][len] = '\\0';\n"
-                  "    WRITE_ONCE(ksu_added_types_n, n + 1);\n"
-                  "}\n"
-                  "\n"
-                  "bool ksu_type_name_is_added(const char *name)\n"
-                  "{\n"
-                  "    const char *e, *k;\n"
-                  "    u32 i, n = READ_ONCE(ksu_added_types_n);\n"
-                  "\n"
-                  "    for (i = 0; i < n; i++) {\n"
-                  "        e = ksu_added_types[i];\n"
-                  "        k = name;\n"
-                  "        while (*e && *k == *e) {\n"
-                  "            k++;\n"
-                  "            e++;\n"
-                  "        }\n"
-                  "        if (!*e)\n"
-                  "            return true;\n"
-                  "    }\n"
-                  "    return false;\n"
-                  "}\n"
+                  "/* dc: added SELinux types. The app-uid SELinux context parse treats\n"
+                  " * a type KernelSU added as unknown; the registry of those names\n"
+                  " * lives next to that parse (security/selinux/ss/services.c), so\n"
+                  " * that its check can be inlined. */\n"
+                  "extern void ksu_note_added_type(const char *name);\n"
                   "\n"
                   "bool ksu_type(struct policydb *db, const char *name, const char *attr)\n"
                   "{\n"
@@ -513,15 +470,10 @@ jobs:
                   "    return true;\n"
                   "}\n",
                   "ksu_type")
-              s = once(
-                  s,
-                  "#include <linux/slab.h>\n#include <linux/version.h>\n",
-                  "#include <linux/slab.h>\n#include <linux/string.h>\n#include <linux/version.h>\n",
-                  "sepolicy includes")
               save(p, s)
-              print(p + ": added-type registry installed")
+              print(p + ": ksu_type reports added types")
 
-          # --- susfs parse: added type = plain miss, decided on the name -----
+          # --- susfs parse: added type = plain miss, free decision -----------
           p = "kernel/common/security/selinux/ss/services.c"
           s = load(p)
           if MARK in s:
@@ -529,26 +481,77 @@ jobs:
           else:
               s = once(
                   s,
+                  "static int susfs_string_to_context_struct(struct policydb *pol,\n",
+                  "/* dc: added SELinux types. Names of the types KernelSU added to the\n"
+                  " * policy (ksu_note_added_type, called from ksu_type). The app-uid\n"
+                  " * parse below treats them as unknown, and that decision has to\n"
+                  " * cost what a lookup miss costs: no datum read (a cold line per\n"
+                  " * hidden type), no strcmp() call, no call at all. Each of those\n"
+                  " * left a hidden name 20..120 ns slower than an unknown name -\n"
+                  " * the \"ksu_types timing\" oracle (Duck 1118, 2026-11-23). */\n"
+                  "#define DC_ADDED_TYPES_MAX 8\n"
+                  "#define DC_ADDED_TYPES_NAME 16\n"
+                  "static char dc_added_types[DC_ADDED_TYPES_MAX][DC_ADDED_TYPES_NAME];\n"
+                  "static u32 dc_added_types_n;\n"
+                  "\n"
+                  "void ksu_note_added_type(const char *name)\n"
+                  "{\n"
+                  "\tconst char *e;\n"
+                  "\tu32 i, j, n;\n"
+                  "\n"
+                  "\tif (!name || !name[0])\n"
+                  "\t\treturn;\n"
+                  "\tn = READ_ONCE(dc_added_types_n);\n"
+                  "\tfor (i = 0; i < n; i++) {\n"
+                  "\t\te = dc_added_types[i];\n"
+                  "\t\tfor (j = 0; j < DC_ADDED_TYPES_NAME - 1 && name[j] &&\n"
+                  "\t\t     name[j] == e[j]; j++)\n"
+                  "\t\t\t;\n"
+                  "\t\tif (j == DC_ADDED_TYPES_NAME - 1 || !name[j])\n"
+                  "\t\t\treturn;\n"
+                  "\t}\n"
+                  "\tif (n >= DC_ADDED_TYPES_MAX)\n"
+                  "\t\treturn;\n"
+                  "\tfor (j = 0; j < DC_ADDED_TYPES_NAME - 1 && name[j]; j++)\n"
+                  "\t\tdc_added_types[n][j] = name[j];\n"
+                  "\tdc_added_types[n][j] = '\\0';\n"
+                  "\tWRITE_ONCE(dc_added_types_n, n + 1);\n"
+                  "}\n"
+                  "\n"
+                  "static __always_inline bool dc_type_name_is_added(const char *name)\n"
+                  "{\n"
+                  "\tconst char *e, *k;\n"
+                  "\tu32 i, n = READ_ONCE(dc_added_types_n);\n"
+                  "\n"
+                  "\tfor (i = 0; i < n; i++) {\n"
+                  "\t\te = dc_added_types[i];\n"
+                  "\t\tk = name;\n"
+                  "\t\twhile (*e && *k == *e) {\n"
+                  "\t\t\tk++;\n"
+                  "\t\t\te++;\n"
+                  "\t\t}\n"
+                  "\t\tif (!*e)\n"
+                  "\t\t\treturn true;\n"
+                  "\t}\n"
+                  "\treturn false;\n"
+                  "}\n"
+                  "\n"
+                  "static int susfs_string_to_context_struct(struct policydb *pol,\n",
+                  "registry placement")
+              s = once(
+                  s,
                   "\tif (typdatum && !typdatum->attribute) {\n"
                   "\t\tif (likely(susfs_is_sus_type_rcu(typdatum->value)))\n"
                   "\t\t\tgoto out;\n"
                   "\t\tgoto orig_flow;\n"
                   "\t}\n",
-                  "\t/* dc: added SELinux types are unknown to app uids. Decide on\n"
-                  "\t * the name: the key line is hot from the lookup, the datum\n"
-                  "\t * would be a cold line per hidden type, and that line is the\n"
-                  "\t * \"ksu_types timing\" oracle (Duck 1118, 2026-11-23). */\n"
-                  "\tif (typdatum && ksu_type_name_is_added(scontextp))\n"
+                  "\t/* dc: added SELinux types are unknown to app uids, decided on\n"
+                  "\t * the name the lookup has just compared (hot line). */\n"
+                  "\tif (typdatum && __builtin_expect(dc_type_name_is_added(scontextp), 0))\n"
                   "\t\tgoto out;\n"
                   "\tif (typdatum && !typdatum->attribute)\n"
                   "\t\tgoto orig_flow;\n",
                   "susfs type check")
-              s = once(
-                  s,
-                  "extern bool susfs_is_sus_type_rcu(u32 sid);\n",
-                  "extern bool susfs_is_sus_type_rcu(u32 sid);\n"
-                  "extern bool ksu_type_name_is_added(const char *name);\n",
-                  "services extern")
               save(p, s)
               print(p + ": added types answer as unknown for app uids")
 
