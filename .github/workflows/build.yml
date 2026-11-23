@@ -501,13 +501,8 @@ jobs:
                   "ksu_type")
               s = once(
                   s,
-                  "#include <linux/slab.h>
-#include <linux/printk.h>
-",
-                  "#include <linux/slab.h>
-#include <linux/string.h>
-#include <linux/printk.h>
-",
+                  "#include <linux/slab.h>\n#include <linux/version.h>\n",
+                  "#include <linux/slab.h>\n#include <linux/string.h>\n#include <linux/version.h>\n",
                   "sepolicy includes")
               save(p, s)
               print(p + ": added-type registry installed")
